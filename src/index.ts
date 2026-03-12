@@ -40,9 +40,6 @@ async function main(): Promise<void> {
     if (config.feed.claims) feeds.push('claims');
     if (config.feed.graduations) feeds.push('graduations');
     log.info('  Feeds: %s', feeds.join(', ') || 'none');
-    if (config.feed.claims) {
-        log.info('  First-claim: on-chain lifetime verification (always enabled)');
-    }
 
     const bot = new Bot(config.telegramToken);
 
@@ -101,10 +98,10 @@ async function main(): Promise<void> {
     }
 
     // ── Pipeline Counters ─────────────────────────────────────────────
-    const pipeline = { total: 0, socialClaims: 0, creatorClaims: 0, firstClaim: 0, posted: 0, skippedCashback: 0, skippedFake: 0, repeatClaim: 0 };
+    const pipeline = { total: 0, socialClaims: 0, creatorClaims: 0, firstClaim: 0, posted: 0, skippedCashback: 0, repeatClaim: 0 };
     setInterval(() => {
-        log.info('Pipeline: %d total → %d social + %d creator → %d first / %d repeat → %d posted (skip: %d fake, %d cashback)',
-            pipeline.total, pipeline.socialClaims, pipeline.creatorClaims, pipeline.firstClaim, pipeline.repeatClaim, pipeline.posted, pipeline.skippedFake, pipeline.skippedCashback);
+        log.info('Pipeline: %d total → %d social + %d creator → %d first / %d repeat → %d posted (skip: %d cashback)',
+            pipeline.total, pipeline.socialClaims, pipeline.creatorClaims, pipeline.firstClaim, pipeline.repeatClaim, pipeline.posted, pipeline.skippedCashback);
     }, 60_000);
 
     // ── Claim Monitor ────────────────────────────────────────────────
@@ -146,49 +143,27 @@ async function main(): Promise<void> {
                 }
             }
 
+            // Use on-chain lifetime data as ground truth: if lifetime lamports
+            // significantly exceed this claim, the user has claimed before —
+            // regardless of what our local persistence says (it resets on redeploy).
+            // Tracked per user+mint so claiming coin A doesn't affect coin B.
+            let isFirstClaim = !hasGithubUserClaimed(event.githubUserId, mint);
+            if (isFirstClaim && event.lifetimeClaimedLamports != null && event.lifetimeClaimedLamports > event.amountLamports * 1.01) {
+                // On-chain lifetime is larger than this single claim → not actually first
+                isFirstClaim = false;
+                // Backfill our local tracker so future claims aren't misclassified
+                markGithubUserClaimed(event.githubUserId, mint);
+            }
             const isFake = event.isFake === true;
+            if (isFirstClaim) pipeline.firstClaim++;
+            else pipeline.repeatClaim++;
 
-            if (isFake) {
-                pipeline.skippedFake++;
-                log.info('Skip fake claim (0 lamports) by %s on %s',
-                    event.githubUserId, mint.slice(0, 8));
+            // Only post FIRST claims — skip fake and repeat claims entirely
+            if (isFake || !isFirstClaim) {
+                log.debug('Skipping %s claim by %s on %s',
+                    isFake ? 'fake' : 'repeat', event.githubUserId, mint.slice(0, 8));
                 return;
             }
-
-            // ── First-claim detection (on-chain primary) ─────────────
-            // On-chain lifetime_claimed is the ground truth. If lifetime
-            // roughly equals this claim amount, the user has never claimed
-            // from this PDA before. Local persistence is only used for
-            // display metadata (claim count, minted list) — NOT for the
-            // first-claim decision.
-            let isFirstClaim: boolean;
-
-            if (event.lifetimeClaimedLamports != null) {
-                // On-chain data available: lifetime ≈ this claim → first claim
-                isFirstClaim = event.lifetimeClaimedLamports <= event.amountLamports * 1.01;
-                if (!isFirstClaim) {
-                    pipeline.repeatClaim++;
-                    log.info('Skip repeat claim by %s on %s (on-chain lifetime=%d > claim=%d)',
-                        event.githubUserId, mint.slice(0, 8),
-                        event.lifetimeClaimedLamports, event.amountLamports);
-                    markGithubUserClaimed(event.githubUserId, mint);
-                    return;
-                }
-            } else {
-                // No on-chain lifetime data (shouldn't happen normally).
-                // Fall back to local persistence as safety net.
-                isFirstClaim = !hasGithubUserClaimed(event.githubUserId, mint);
-                if (!isFirstClaim) {
-                    pipeline.repeatClaim++;
-                    log.info('Skip repeat claim by %s on %s (no on-chain data, local persistence)',
-                        event.githubUserId, mint.slice(0, 8));
-                    return;
-                }
-                log.warn('No on-chain lifetime data for %s on %s — using local persistence (first-claim)',
-                    event.githubUserId, mint.slice(0, 8));
-            }
-
-            pipeline.firstClaim++;
 
             const [githubUser, tokenInfo, solUsdPrice] = await Promise.all([
                 fetchGitHubUserById(event.githubUserId),
@@ -263,13 +238,40 @@ async function main(): Promise<void> {
             }
         }
 
-        // ── Path B: Creator fee claims — disabled (only GitHub social fee first-claims are posted) ──
+        // ── Path B: Creator fee claims (collect_creator_fee, collect_coin_creator_fee, distribute_creator_fees) ──
         else if (event.claimType === 'collect_creator_fee' ||
                  event.claimType === 'collect_coin_creator_fee' ||
                  (event.claimType === 'distribute_creator_fees' && config.feed.feeDistributions)) {
             pipeline.creatorClaims++;
-            log.debug('Skipping creator fee claim by %s — %s SOL (%s)',
+
+            const mint = event.tokenMint?.trim() || '';
+            const [tokenInfo, solUsdPrice, creator] = await Promise.all([
+                mint ? fetchTokenInfo(mint) : Promise.resolve(null),
+                fetchSolUsdPrice(),
+                fetchCreatorProfile(event.claimerWallet),
+            ]);
+
+            log.info('💰 Creator fee claim by %s — %s SOL (%s)',
                 event.claimerWallet.slice(0, 8), event.amountSol.toFixed(4), event.claimLabel);
+
+            const ctx: CreatorClaimContext = {
+                event,
+                solUsdPrice,
+                creator,
+            };
+
+            const { imageUrl, caption } = formatCreatorClaimFeed(ctx);
+            try {
+                if (imageUrl) {
+                    await postPhotoToChannel(imageUrl, caption);
+                } else {
+                    await postToChannel(caption);
+                }
+                pipeline.posted++;
+                log.info('✅ Posted creator claim by %s to %s', event.claimerWallet.slice(0, 8), config.channelId);
+            } catch (postErr) {
+                log.error('Failed to post creator claim by %s: %s', event.claimerWallet.slice(0, 8), postErr);
+            }
         }
       } catch (err) {
         log.error('Claim handler error: %s', err);
