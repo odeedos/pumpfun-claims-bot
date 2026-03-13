@@ -2,7 +2,9 @@
 
 Read-only Telegram channel feed that broadcasts PumpFun on-chain activity — GitHub social fee claims, token graduations, and more. Posts rich, intelligence-enriched cards to a Telegram channel in real time.
 
-> **Live channel**: [@pumpfunclaims](https://t.me/pumpfunclaims) — powered by [@pumpclaimsbot](https://t.me/pumpclaimsbot)
+ **[pumpfun-claims-bot.vercel.app](https://pumpfun-claims-bot.vercel.app)** 
+
+> **Live channel**: [Telegram @ pumpfunclaims](https://t.me/pumpfunclaims) — powered by [pumpfun-claims-bot](https://pumpfun-claims-bot.vercel.app/)
 >
 > **Looking for interactive monitoring?** The [telegram-bot](../telegram-bot/) supports watch management, group chats, REST API, SSE streaming, and webhooks. Use this channel-bot for simple broadcast-only channels.
 
