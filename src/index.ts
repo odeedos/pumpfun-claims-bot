@@ -146,13 +146,24 @@ async function main(): Promise<void> {
             // Use on-chain lifetime data as ground truth: if lifetime lamports
             // significantly exceed this claim, the user has claimed before —
             // regardless of what our local persistence says (it resets on redeploy).
-            // Tracked per user+mint so claiming coin A doesn't affect coin B.
-            let isFirstClaim = !hasGithubUserClaimed(event.githubUserId, mint);
-            if (isFirstClaim && event.lifetimeClaimedLamports != null && event.lifetimeClaimedLamports > event.amountLamports * 1.01) {
-                // On-chain lifetime is larger than this single claim → not actually first
+            // A GitHub user's VERY FIRST claim ever (any token) is considered "first".
+            // Subsequent claims on new tokens are repeats.
+            const allMints = event.allCandidateMints?.length
+                ? event.allCandidateMints
+                : (mint ? [mint] : []);
+            // Stable PDA key — survives mint resolution changes across restarts
+            const pdaKey = event.socialFeePda ? `pda:${event.socialFeePda}` : '';
+            let isFirstClaim =
+                !hasGithubUserClaimed(event.githubUserId!) &&
+                !(pdaKey && hasGithubUserClaimed(event.githubUserId!, pdaKey));
+            if (isFirstClaim && event.lifetimeClaimedLamports != null
+                && event.lifetimeClaimedLamports > event.amountLamports) {
+                // On-chain lifetime exceeds this claim → user has claimed from this PDA before
                 isFirstClaim = false;
-                // Backfill our local tracker so future claims aren't misclassified
-                markGithubUserClaimed(event.githubUserId, mint);
+                // Backfill all keys so future claims are correctly identified as repeats
+                markGithubUserClaimed(event.githubUserId!);
+                if (pdaKey) markGithubUserClaimed(event.githubUserId!, pdaKey);
+                for (const m of allMints) markGithubUserClaimed(event.githubUserId!, m);
             }
             const isFake = event.isFake === true;
             if (isFirstClaim) pipeline.firstClaim++;
@@ -228,7 +239,11 @@ async function main(): Promise<void> {
                 } else {
                     await postToChannel(caption);
                 }
-                markGithubUserClaimed(event.githubUserId, mint);
+                // Mark all three key types: user-global, PDA-stable, and per-mint
+                markGithubUserClaimed(event.githubUserId!);
+                if (pdaKey) markGithubUserClaimed(event.githubUserId!, pdaKey);
+                markGithubUserClaimed(event.githubUserId!, mint);
+                for (const m of allMints) markGithubUserClaimed(event.githubUserId!, m);
                 pipeline.posted++;
                 log.info('✅ Posted GitHub claim by %s (%s) to %s',
                     event.githubUserId, githubUser?.login ?? '?', config.channelId);

@@ -272,24 +272,40 @@ export function isFirstClaimByGithubUser(githubUserId: string): boolean {
 }
 
 /**
- * Check if this GitHub user has already claimed a specific token.
- * Tracked per user+mint so claiming coin A doesn't affect coin B.
+ * Check if this GitHub user has already claimed any social fee.
+ * Always checks the bare user-level key first so cross-mint repeat claims
+ * are caught even after a container restart (when per-mint keys may be gone).
  */
 export function hasGithubUserClaimed(githubUserId: string, mint?: string): boolean {
-    const key = mint ? `${githubUserId}:${mint}` : githubUserId;
-    return githubUserFirstClaim.has(key);
+    // user-level key: once set, any claim by this user is a repeat
+    if (githubUserFirstClaim.has(githubUserId)) return true;
+    if (mint) return githubUserFirstClaim.has(`${githubUserId}:${mint}`);
+    return false;
 }
 
-/** Mark a GitHub user as having claimed a specific token. */
+/** Mark a GitHub user as having claimed. Always sets the bare user-level key
+ * (so cross-mint repeats are caught after restarts) plus the per-mint key. */
 export function markGithubUserClaimed(githubUserId: string, mint?: string): void {
-    const key = mint ? `${githubUserId}:${mint}` : githubUserId;
-    if (githubUserFirstClaim.has(key)) return;
-    githubUserFirstClaim.add(key);
-    scheduleSave();
-    if (githubUserFirstClaim.size > MAX_ENTRIES) {
-        const first = githubUserFirstClaim.values().next().value;
-        if (first) githubUserFirstClaim.delete(first);
+    // Always mark at user level
+    if (!githubUserFirstClaim.has(githubUserId)) {
+        githubUserFirstClaim.add(githubUserId);
+        if (githubUserFirstClaim.size > MAX_ENTRIES) {
+            const first = githubUserFirstClaim.values().next().value;
+            if (first) githubUserFirstClaim.delete(first);
+        }
     }
+    // Also mark per-mint for finer-grained history
+    if (mint) {
+        const key = `${githubUserId}:${mint}`;
+        if (!githubUserFirstClaim.has(key)) {
+            githubUserFirstClaim.add(key);
+            if (githubUserFirstClaim.size > MAX_ENTRIES) {
+                const first = githubUserFirstClaim.values().next().value;
+                if (first) githubUserFirstClaim.delete(first);
+            }
+        }
+    }
+    scheduleSave();
 }
 
 /** Total unique wallet+token pairs tracked. */
@@ -318,7 +334,11 @@ export function getGithubUserClaimedMints(githubUserId: string): string[] {
     const mints: string[] = [];
     for (const key of githubUserFirstClaim) {
         if (key.startsWith(prefix)) {
-            mints.push(key.slice(prefix.length));
+            const val = key.slice(prefix.length);
+            // Exclude PDA-stability keys (pda:...) — those aren't mint addresses
+            if (!val.startsWith('pda:')) {
+                mints.push(val);
+            }
         }
     }
     return mints;

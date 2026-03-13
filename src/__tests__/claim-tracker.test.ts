@@ -151,10 +151,11 @@ describe('hasGithubUserClaimed / markGithubUserClaimed', () => {
         expect(hasGithubUserClaimed('gh_has_2', 'mint_has_2')).toBe(true);
     });
 
-    it('tracks user+mint pairs independently', () => {
+    it('claiming one mint marks user as claimed for ALL mints (cross-mint repeat detection)', () => {
         markGithubUserClaimed('gh_has_3', 'mint_has_3a');
         expect(hasGithubUserClaimed('gh_has_3', 'mint_has_3a')).toBe(true);
-        expect(hasGithubUserClaimed('gh_has_3', 'mint_has_3b')).toBe(false);
+        // Claiming mint_3a should also flag mint_3b as repeat via user-level key
+        expect(hasGithubUserClaimed('gh_has_3', 'mint_has_3b')).toBe(true);
     });
 
     it('does not double-add on repeated markings', () => {

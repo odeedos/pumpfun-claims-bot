@@ -110,9 +110,15 @@ export class SocialFeeIndex {
         if (this.bootstrapped) return;
         try {
             log.info('SocialFeeIndex: bootstrapping from on-chain SharingConfig accounts...');
+            // dataSlice caps the returned data to only the bytes we parse:
+            // disc(8) + bump(1) + version(1) + status(1) + mint(32) + admin(32) +
+            // admin_revoked(1) + shareholders(4 + up to 20*34=680) = 760 bytes max.
+            // Without this, returning full account data for every SharingConfig
+            // account exhausts the JS heap at startup.
             const accounts = await rpc.withFallback((conn) =>
                 conn.getProgramAccounts(new PublicKey(PUMP_FEE_PROGRAM_ID), {
                     commitment: 'confirmed',
+                    dataSlice: { offset: 0, length: 760 },
                     filters: [
                         {
                             memcmp: {

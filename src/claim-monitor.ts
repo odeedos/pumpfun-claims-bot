@@ -5,6 +5,9 @@
  * Two modes: WebSocket (real-time) or HTTP polling (fallback).
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
     Connection,
     LAMPORTS_PER_SOL,
@@ -41,6 +44,11 @@ const MAX_QUEUE_SIZE = 50;
 const RATE_LIMIT_LOG_WINDOW_MS = 30_000;
 const WS_HEARTBEAT_INTERVAL_MS = 60_000;
 const WS_HEARTBEAT_TIMEOUT_MS = 90_000;
+
+// Persistence for poll cursor (survives restarts so already-seen txs aren't re-processed)
+const DATA_DIR = process.env.DATA_DIR || join(process.cwd(), 'data');
+const LAST_SIGNATURES_FILE = join(DATA_DIR, 'last-signatures.json');
+const LAST_SIG_SAVE_DEBOUNCE_MS = 3_000;
 
 class RpcQueue {
     private queue: string[] = [];
@@ -129,6 +137,7 @@ export class ClaimMonitor {
     private claimTxProcessed = 0;
     private claimsByType = new Map<string, number>();
     private socialFeeIndex = new SocialFeeIndex();
+    private lastSigSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor(config: ChannelBotConfig, onClaim: (event: FeeClaimEvent) => void) {
         this.config = config;
@@ -155,6 +164,10 @@ export class ClaimMonitor {
         this.startedAt = Date.now();
 
         log.info('Claim monitor: monitoring %d programs', this.programPubkeys.length);
+
+        // Load persisted poll cursors so we don't re-process already-seen transactions
+        // on restart (which would cause duplicate "FIRST CLAIM" posts after redeploy).
+        this.loadLastSignatures();
 
         // Bootstrap social fee index from on-chain SharingConfig accounts (non-blocking)
         this.socialFeeIndex.bootstrap(this.rpc).catch((err: unknown) => {
@@ -340,6 +353,7 @@ export class ClaimMonitor {
     }
 
     private async pollAllPrograms(): Promise<void> {
+        let updated = false;
         for (const pubkey of this.programPubkeys) {
             const programId = pubkey.toBase58();
             const opts: SignaturesForAddressOptions = { limit: 20 };
@@ -350,6 +364,7 @@ export class ClaimMonitor {
             if (sigs.length === 0) continue;
 
             this.lastSignatures.set(programId, sigs[0]!.signature);
+            updated = true;
 
             for (const sigInfo of sigs) {
                 if (sigInfo.err) continue;
@@ -359,6 +374,42 @@ export class ClaimMonitor {
             }
         }
         this.trimProcessedCache();
+        if (updated) this.scheduleLastSignaturesSave();
+    }
+
+    /** Load the persisted poll cursors from disk. */
+    private loadLastSignatures(): void {
+        try {
+            if (!existsSync(LAST_SIGNATURES_FILE)) return;
+            const raw = readFileSync(LAST_SIGNATURES_FILE, 'utf8');
+            const data: unknown = JSON.parse(raw);
+            if (data && typeof data === 'object') {
+                for (const [k, v] of Object.entries(data)) {
+                    if (typeof v === 'string') this.lastSignatures.set(k, v);
+                }
+                log.info('Claim monitor: loaded %d persisted poll cursors', this.lastSignatures.size);
+            }
+        } catch (err) {
+            log.warn('Claim monitor: failed to load poll cursors: %s', err);
+        }
+    }
+
+    /** Persist the current poll cursors to disk (debounced). */
+    private scheduleLastSignaturesSave(): void {
+        if (this.lastSigSaveTimer) return;
+        this.lastSigSaveTimer = setTimeout(() => {
+            this.lastSigSaveTimer = null;
+            try {
+                if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+                const obj: Record<string, string> = {};
+                for (const [k, v] of this.lastSignatures) {
+                    if (v) obj[k] = v;
+                }
+                writeFileSync(LAST_SIGNATURES_FILE, JSON.stringify(obj), 'utf8');
+            } catch (err) {
+                log.warn('Claim monitor: failed to save poll cursors: %s', err);
+            }
+        }, LAST_SIG_SAVE_DEBOUNCE_MS);
     }
 
     // ── Transaction Processing ───────────────────────────────────────
@@ -535,10 +586,15 @@ export class ClaimMonitor {
                         amountLamports = Number(view.getBigUint64(offset, true));
                         offset += 8;
                     }
-                    // claimable_before: u64 — skip
-                    offset += 8;
-                    // lifetime_claimed: u64
-                    if (bytes.length >= offset + 8) {
+                    // Next two u64 fields are lifetime_claimed and claimable_before (order uncertain
+                    // across program versions).  Read both and take the larger — if the user has
+                    // claimed before, the true cumulative lifetime will exceed any single claim amount.
+                    if (bytes.length >= offset + 16) {
+                        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+                        const fieldA = Number(view.getBigUint64(offset, true));
+                        const fieldB = Number(view.getBigUint64(offset + 8, true));
+                        lifetimeClaimedLamports = Math.max(fieldA, fieldB);
+                    } else if (bytes.length >= offset + 8) {
                         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
                         lifetimeClaimedLamports = Number(view.getBigUint64(offset, true));
                     }
