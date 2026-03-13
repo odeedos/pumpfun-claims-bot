@@ -300,9 +300,6 @@ export class ClaimMonitor {
                     this.socialFeeIndex.updateFromCreateEvent(bytes);
                 } else if (disc === UPDATE_FEE_SHARES_EVENT_DISC) {
                     this.socialFeeIndex.updateFromUpdateSharesEvent(bytes);
-                } else if (disc === '3212c141edd2eaec') {
-                    // SocialFeePdaClaimed event — treat as a social fee PDA claim
-                    hasClaimIx = true;
                 }
             } catch { /* ignore unparseable */ }
         }

@@ -105,113 +105,44 @@ export class SocialFeeIndex {
     /**
      * Bootstrap the index by scanning ALL SharingConfig accounts on-chain.
      * Runs once at startup so historical configs are covered.
-     *
-     * Uses `dataSlice` to fetch only the fields we need (mint + shareholders),
-     * skipping the 8-byte discriminator to reduce per-account memory.
-     *
-     * To avoid OOM from a single massive `getProgramAccounts` response, the
-     * fetch is partitioned into 256 chunks by the first byte of the mint
-     * pubkey, processed in small concurrent batches.
-     *
-     * Set SKIP_SOCIAL_FEE_BOOTSTRAP=true to disable if not needed.
      */
     async bootstrap(rpc: RpcFallback): Promise<void> {
         if (this.bootstrapped) return;
-
-        if (process.env.SKIP_SOCIAL_FEE_BOOTSTRAP === 'true') {
-            log.info('SocialFeeIndex: bootstrap skipped (SKIP_SOCIAL_FEE_BOOTSTRAP=true), relying on live events');
-            this.bootstrapped = true;
-            return;
-        }
-
         try {
             log.info('SocialFeeIndex: bootstrapping from on-chain SharingConfig accounts...');
+            const accounts = await rpc.withFallback((conn) =>
+                conn.getProgramAccounts(new PublicKey(PUMP_FEE_PROGRAM_ID), {
+                    commitment: 'confirmed',
+                    filters: [
+                        {
+                            memcmp: {
+                                offset: 0,
+                                bytes: SHARING_CONFIG_DISC.toString('base64'),
+                                encoding: 'base64',
+                            },
+                        },
+                    ],
+                }),
+            ) as unknown as Array<{ pubkey: PublicKey; account: { data: Buffer } }>;
 
-            // dataSlice: skip the 8-byte discriminator, fetch from offset 3 (bump/version/status)
-            // through the shareholders vec. Max shareholders = 20, each 34 bytes.
-            // Sliced layout relative to returned data:
-            //   [0..2]   = bump(1) + version(1) + status(1)
-            //   [3..34]  = mint (32 bytes)
-            //   [35..66] = admin (32 bytes)  — skipped during parse
-            //   [67]     = admin_revoked (1 byte)
-            //   [68..]   = shareholders vec (4 + n*34)
-            const SLICE_OFFSET = 8; // skip discriminator
-            const SLICE_LENGTH = 3 + 32 + 32 + 1 + 4 + 20 * 34; // 752 bytes max
-
-            // Mint pubkey absolute offset in account data: disc(8) + bump(1) + version(1) + status(1) = 11
-            const MINT_ABS_OFFSET = 11;
-
-            let totalAccounts = 0;
             let indexed = 0;
+            for (const { account } of accounts) {
+                const data = account.data as Buffer;
+                // Layout: disc(8) + bump(1) + version(1) + status(1) + mint(32) + admin(32) + admin_revoked(1) + shareholders(4+n*34)
+                if (data.length < 76) continue;
 
-            // Chunk GPA by first byte of the mint pubkey to avoid OOM.
-            // Each chunk fetches ~1/256th of all SharingConfig accounts.
-            // Concurrency kept low with inter-batch delay to respect rate limits.
-            const CONCURRENCY = 2;
-            const BATCH_DELAY_MS = 500;
-            for (let batchStart = 0; batchStart < 256; batchStart += CONCURRENCY) {
-                const batchEnd = Math.min(batchStart + CONCURRENCY, 256);
-                type GpaResult = Array<{ pubkey: PublicKey; account: { data: Buffer } }>;
-                const fetches: Promise<GpaResult | null>[] = [];
+                const mint = readPubkey(data, 11); // offset: 8+1+1+1 = 11
+                if (!mint) continue;
 
-                for (let b = batchStart; b < batchEnd; b++) {
-                    const mintByte = Buffer.from([b]);
-                    fetches.push(
-                        (rpc.withFallback((conn) =>
-                            conn.getProgramAccounts(new PublicKey(PUMP_FEE_PROGRAM_ID), {
-                                commitment: 'confirmed',
-                                dataSlice: { offset: SLICE_OFFSET, length: SLICE_LENGTH },
-                                filters: [
-                                    {
-                                        memcmp: {
-                                            offset: 0,
-                                            bytes: SHARING_CONFIG_DISC.toString('base64'),
-                                            encoding: 'base64',
-                                        },
-                                    },
-                                    {
-                                        memcmp: {
-                                            offset: MINT_ABS_OFFSET,
-                                            bytes: mintByte.toString('base64'),
-                                            encoding: 'base64',
-                                        },
-                                    },
-                                ],
-                            }),
-                        ) as Promise<unknown>).then(
-                            (res) => res as GpaResult,
-                            () => null, // swallow per-chunk errors; partial index is still useful
-                        ),
-                    );
+                const shareholders = parseShareholderAddresses(data, 76);
+                for (const addr of shareholders) {
+                    this.addMapping(addr, mint);
+                    indexed++;
                 }
-
-                const results = await Promise.all(fetches);
-                let batchHad429 = false;
-                for (const accounts of results) {
-                    if (!accounts) { batchHad429 = true; continue; }
-                    totalAccounts += accounts.length;
-                    for (let i = 0; i < accounts.length; i++) {
-                        const data = accounts[i]!.account.data as Buffer;
-                        if (data.length < 68) continue;
-
-                        const mint = readPubkey(data, 3);
-                        if (!mint) continue;
-
-                        const shareholders = parseShareholderAddresses(data, 68);
-                        for (const addr of shareholders) {
-                            this.addMapping(addr, mint);
-                            indexed++;
-                        }
-                    }
-                }
-
-                // Delay between batches; back off harder if we saw 429 failures
-                const delay = batchHad429 ? BATCH_DELAY_MS * 4 : BATCH_DELAY_MS;
-                await new Promise(r => setTimeout(r, delay));
             }
 
             this.bootstrapped = true;
-            log.info('SocialFeeIndex: bootstrapped %d mappings from %d SharingConfig accounts', indexed, totalAccounts);
+            log.info('SocialFeeIndex: bootstrapped %d mappings from %d SharingConfig accounts', indexed, accounts.length);
         } catch (err) {
             log.warn('SocialFeeIndex: bootstrap failed (will rely on live events): %s', err);
             this.bootstrapped = true; // don't retry on every restart
