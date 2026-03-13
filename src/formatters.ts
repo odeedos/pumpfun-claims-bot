@@ -422,17 +422,23 @@ export function formatGitHubClaimFeed(ctx: ClaimFeedContext): { imageUrl: string
         L.push(`📊 <a href="https://pump.fun/coin/${mint}">pump.fun/coin/${mint.slice(0, 12)}…</a>`);
     }
 
-    // ━━ SOCIALS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    if (githubUser?.twitterUsername) {
-        const handle = cleanXHandle(githubUser.twitterUsername);
+    // ━━ SOCIALS (token's) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if (tokenInfo?.twitter) {
+        const handle = cleanXHandle(tokenInfo.twitter);
         if (handle) {
             L.push(`𝕏 <a href="https://x.com/${esc(handle)}">${esc(handle)}</a>`);
+        } else {
+            L.push(`𝕏 <a href="${esc(tokenInfo.twitter)}">Twitter</a>`);
         }
     }
-    if (ctx.repoInfo?.htmlUrl) {
-        const repoPath = ctx.repoInfo.htmlUrl.replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
-        L.push(`🌐 <a href="${esc(ctx.repoInfo.htmlUrl)}">github.com/${esc(repoPath)}</a>`);
-    } else if (tokenInfo?.githubUrls?.length) {
+    if (tokenInfo?.telegram) {
+        L.push(`💬 <a href="${esc(tokenInfo.telegram)}">Telegram</a>`);
+    }
+    if (tokenInfo?.website) {
+        const host = tokenInfo.website.replace(/^https?:\/\//, '').replace(/\/+$/, '').slice(0, 30);
+        L.push(`🌐 <a href="${esc(tokenInfo.website)}">${esc(host)}</a>`);
+    }
+    if (tokenInfo?.githubUrls?.length) {
         const repoUrl = tokenInfo.githubUrls[0]!;
         const repoPath = repoUrl.replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
         L.push(`🌐 <a href="${esc(repoUrl)}">github.com/${esc(repoPath)}</a>`);

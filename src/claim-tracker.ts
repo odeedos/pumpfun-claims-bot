@@ -122,40 +122,58 @@ export function loadPersistedClaims(): void {
     }
 }
 
+/** Write all claim state to disk synchronously (called by scheduleSave and flushPersistedClaims). */
+function doSave(): void {
+    try {
+        if (!existsSync(DATA_DIR)) {
+            mkdirSync(DATA_DIR, { recursive: true });
+        }
+        const arr = [...tokenFirstClaim];
+        const toSave = arr.length > MAX_ENTRIES ? arr.slice(arr.length - MAX_ENTRIES) : arr;
+        writeFileSync(FIRST_CLAIMS_FILE, JSON.stringify(toSave), 'utf8');
+
+        const walletArr = [...walletFirstClaim];
+        const walletToSave = walletArr.length > MAX_ENTRIES ? walletArr.slice(walletArr.length - MAX_ENTRIES) : walletArr;
+        writeFileSync(WALLET_FIRST_CLAIMS_FILE, JSON.stringify(walletToSave), 'utf8');
+
+        const ghArr = [...githubUserFirstClaim];
+        const ghToSave = ghArr.length > MAX_ENTRIES ? ghArr.slice(ghArr.length - MAX_ENTRIES) : ghArr;
+        writeFileSync(GITHUB_FIRST_CLAIMS_FILE, JSON.stringify(ghToSave), 'utf8');
+
+        const gutArr = [...githubUserTokenClaims];
+        const gutToSave = gutArr.length > MAX_ENTRIES ? gutArr.slice(gutArr.length - MAX_ENTRIES) : gutArr;
+        writeFileSync(GITHUB_USER_TOKEN_CLAIMS_FILE, JSON.stringify(gutToSave), 'utf8');
+
+        const countsObj: Record<string, number> = {};
+        for (const [k, v] of githubUserClaimCounts) countsObj[k] = v;
+        writeFileSync(GITHUB_CLAIM_COUNTS_FILE, JSON.stringify(countsObj), 'utf8');
+
+        log.debug('Persisted %d first-claim tokens + %d wallets + %d GitHub users + %d user-token pairs to disk', toSave.length, walletToSave.length, ghToSave.length, gutToSave.length);
+    } catch (err) {
+        log.warn('Failed to persist claims: %s', err);
+    }
+}
+
 /** Save first-claim sets to disk (debounced). */
 function scheduleSave(): void {
     if (saveTimer) return;
     saveTimer = setTimeout(() => {
         saveTimer = null;
-        try {
-            if (!existsSync(DATA_DIR)) {
-                mkdirSync(DATA_DIR, { recursive: true });
-            }
-            const arr = [...tokenFirstClaim];
-            const toSave = arr.length > MAX_ENTRIES ? arr.slice(arr.length - MAX_ENTRIES) : arr;
-            writeFileSync(FIRST_CLAIMS_FILE, JSON.stringify(toSave), 'utf8');
-
-            const walletArr = [...walletFirstClaim];
-            const walletToSave = walletArr.length > MAX_ENTRIES ? walletArr.slice(walletArr.length - MAX_ENTRIES) : walletArr;
-            writeFileSync(WALLET_FIRST_CLAIMS_FILE, JSON.stringify(walletToSave), 'utf8');
-
-            const ghArr = [...githubUserFirstClaim];
-            const ghToSave = ghArr.length > MAX_ENTRIES ? ghArr.slice(ghArr.length - MAX_ENTRIES) : ghArr;
-            writeFileSync(GITHUB_FIRST_CLAIMS_FILE, JSON.stringify(ghToSave), 'utf8');
-
-            const gutArr = [...githubUserTokenClaims];
-            const gutToSave = gutArr.length > MAX_ENTRIES ? gutArr.slice(gutArr.length - MAX_ENTRIES) : gutArr;
-            writeFileSync(GITHUB_USER_TOKEN_CLAIMS_FILE, JSON.stringify(gutToSave), 'utf8');
-
-            const countsObj: Record<string, number> = {};
-            for (const [k, v] of githubUserClaimCounts) countsObj[k] = v;
-            writeFileSync(GITHUB_CLAIM_COUNTS_FILE, JSON.stringify(countsObj), 'utf8');
-
-            log.debug('Persisted %d first-claim tokens + %d wallets + %d GitHub users + %d user-token pairs to disk', toSave.length, walletToSave.length, ghToSave.length, gutToSave.length);
-        } catch (err) {
-            log.warn('Failed to persist claims: %s', err);
-        }
+        doSave();
     }, SAVE_DEBOUNCE_MS);
+}
+
+/**
+ * Flush all claim state to disk immediately, bypassing the debounce.
+ * Call this after successfully posting a first-claim so state survives
+ * a deployment restart or crash within the debounce window.
+ */
+export function flushPersistedClaims(): void {
+    if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+    }
+    doSave();
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
