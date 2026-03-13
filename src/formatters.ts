@@ -151,7 +151,7 @@ export function formatGitHubClaimFeed(ctx: ClaimFeedContext): { imageUrl: string
 
     // ━━ CLAIM STATS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     L.push(`💸 <b>Claim Stats</b>`);
-    L.push(`Claim #1`);
+    L.push(`Claim #${ctx.claimNumber ?? 1}`);
     const claimSol = event.amountSol.toFixed(4);
     const claimUsd = solUsdPrice > 0 ? ` ($${(event.amountSol * solUsdPrice).toFixed(2)})` : '';
     L.push(`${claimSol} SOL${claimUsd}`);

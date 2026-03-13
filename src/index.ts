@@ -153,18 +153,41 @@ async function main(): Promise<void> {
                 : (mint ? [mint] : []);
             // Stable PDA key — survives mint resolution changes across restarts
             const pdaKey = event.socialFeePda ? `pda:${event.socialFeePda}` : '';
-            let isFirstClaim =
-                !hasGithubUserClaimed(event.githubUserId!) &&
-                !(pdaKey && hasGithubUserClaimed(event.githubUserId!, pdaKey));
-            if (isFirstClaim && event.lifetimeClaimedLamports != null
-                && event.lifetimeClaimedLamports > event.amountLamports) {
-                // On-chain lifetime exceeds this claim → user has claimed from this PDA before
+
+            // PRIMARY truth: on-chain lifetime data.
+            //   lifetime == amountLamports → definitively the FIRST EVER claim from this PDA on-chain.
+            //   lifetime >  amountLamports → they have claimed before; skip.
+            // FALLBACK (no on-chain data): local persistence.
+            // LOCAL DEDUP: local keys prevent double-posting if the same event replays.
+
+            // Step 1: Local dedup — never re-post for a user we already posted
+            const localKnown = hasGithubUserClaimed(event.githubUserId!);
+
+            let isFirstClaim: boolean;
+            if (localKnown) {
+                // We already posted for this user before — always a repeat
                 isFirstClaim = false;
-                // Backfill all keys so future claims are correctly identified as repeats
-                markGithubUserClaimed(event.githubUserId!);
-                if (pdaKey) markGithubUserClaimed(event.githubUserId!, pdaKey);
-                for (const m of allMints) markGithubUserClaimed(event.githubUserId!, m);
+            } else if (event.lifetimeClaimedLamports != null && event.amountLamports > 0) {
+                // Step 2: On-chain verification — lifetime must equal current claim
+                isFirstClaim = event.lifetimeClaimedLamports <= event.amountLamports;
+                if (!isFirstClaim) {
+                    // Backfill local keys so future repeat events are rejected without on-chain lookup
+                    markGithubUserClaimed(event.githubUserId!);
+                    if (pdaKey) markGithubUserClaimed(event.githubUserId!, pdaKey);
+                    for (const m of allMints) markGithubUserClaimed(event.githubUserId!, m);
+                }
+            } else {
+                // No on-chain lifetime (fake/dust): fall back to local persistence
+                isFirstClaim =
+                    !(pdaKey && hasGithubUserClaimed(event.githubUserId!, pdaKey));
             }
+
+            log.info('Claim check: user=%s mint=%s first=%s lifetime=%s claim=%s localKnown=%s',
+                event.githubUserId, mint.slice(0, 8),
+                isFirstClaim,
+                event.lifetimeClaimedLamports ?? 'null',
+                event.amountLamports,
+                localKnown);
             const isFake = event.isFake === true;
             if (isFirstClaim) pipeline.firstClaim++;
             else pipeline.repeatClaim++;
