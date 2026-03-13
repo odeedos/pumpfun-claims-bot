@@ -437,6 +437,21 @@ export class ClaimMonitor {
                     signature, slot, timestamp, tx, matchedDef, ix,
                 );
                 if (event) {
+                    // On-demand mint resolution: when the SocialFeeIndex didn't
+                    // have this PDA at claim time (e.g. token created before bot
+                    // started and bootstrap is disabled), try to fetch the mint
+                    // from the RPC now so the CA appears in the post.
+                    if (event.claimType === 'claim_social_fee_pda' && !event.tokenMint && event.socialFeePda) {
+                        const resolved = await this.socialFeeIndex.resolveFromChain(event.socialFeePda, this.rpc);
+                        if (resolved) {
+                            event.tokenMint = resolved;
+                            log.info('SocialFeeIndex: on-demand resolved mint %s for PDA %s',
+                                resolved.slice(0, 8), event.socialFeePda.slice(0, 8));
+                        } else {
+                            log.warn('SocialFeeIndex: could not resolve mint for PDA %s — claim will post without CA',
+                                event.socialFeePda.slice(0, 8));
+                        }
+                    }
                     this.claimsDetected++;
                     const typeCount = (this.claimsByType.get(event.claimType) ?? 0) + 1;
                     this.claimsByType.set(event.claimType, typeCount);

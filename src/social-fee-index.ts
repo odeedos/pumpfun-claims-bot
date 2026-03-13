@@ -34,7 +34,7 @@
  *   new_shareholders: vec<Shareholder>
  */
 
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, type AccountInfo } from '@solana/web3.js';
 import type { RpcFallback } from './rpc-fallback.js';
 import { log } from './logger.js';
 
@@ -127,19 +127,16 @@ export class SocialFeeIndex {
         }
         try {
             log.info('SocialFeeIndex: bootstrapping from on-chain SharingConfig accounts...');
-            // dataSlice caps the returned data to only the bytes we parse:
-            // disc(8) + bump(1) + version(1) + status(1) + mint(32) + admin(32) +
-            // admin_revoked(1) + shareholders(4 + up to 20*34=680) = 760 bytes max.
-            // Without this, returning full account data for every SharingConfig
-            // account exhausts the JS heap at startup.
-            const accounts = await rpc.withFallback((conn) =>
+
+            // Phase 1: collect account addresses only (dataSlice length=0 means no
+            // account data is returned). This caps the GPA JSON response at ~40 MB for
+            // 150k accounts, vs ~75 MB when returning 216 bytes per account. The lower
+            // water mark prevents the heap from spiking past the V8 limit on
+            // memory-constrained containers.
+            const refs = await rpc.withFallback((conn) =>
                 conn.getProgramAccounts(new PublicKey(PUMP_FEE_PROGRAM_ID), {
                     commitment: 'confirmed',
-                    // 8(disc)+1+1+1(meta)+32(mint)+32(admin)+1(revoked)+4(count)+4×34(shareholders)=216
-                    // Covers up to 4 shareholders per config. Caps the JSON response at ~43MB
-                    // for 150k accounts instead of ~152MB with the full 760-byte slice,
-                    // avoiding OOM during bootstrap on memory-constrained containers.
-                    dataSlice: { offset: 0, length: 216 },
+                    dataSlice: { offset: 0, length: 0 },
                     filters: [
                         {
                             memcmp: {
@@ -150,26 +147,64 @@ export class SocialFeeIndex {
                         },
                     ],
                 }),
-            ) as unknown as Array<{ pubkey: PublicKey; account: { data: Buffer } }>;
+            ) as unknown as Array<{ pubkey: PublicKey; account: unknown }>;
 
+            // Keep only the pubkeys so V8 can reclaim the AccountInfo objects before
+            // we start phase 2.
+            const pubkeys: PublicKey[] = refs.map(({ pubkey }) => pubkey);
+            const total = pubkeys.length;
+            log.info('SocialFeeIndex: found %d SharingConfig accounts, fetching data in batches...', total);
+
+            // Phase 2: fetch full shareholder data in small concurrent batches so peak
+            // heap per round is bounded (100 accounts × 216 bytes × 5 concurrent ≈ 108 KB
+            // of raw data, easily fitting within any practical heap budget).
+            const BATCH = 100;
+            const CONCURRENCY = 5;
+            const ROUND_DELAY_MS = 150;
             let indexed = 0;
-            for (const { account } of accounts) {
-                const data = account.data as Buffer;
-                // Layout: disc(8) + bump(1) + version(1) + status(1) + mint(32) + admin(32) + admin_revoked(1) + shareholders(4+n*34)
-                if (data.length < 76) continue;
 
-                const mint = readPubkey(data, 11); // offset: 8+1+1+1 = 11
-                if (!mint) continue;
+            for (let i = 0; i < total; i += BATCH * CONCURRENCY) {
+                const promises: Promise<(AccountInfo<Buffer> | null)[] | null>[] = [];
+                for (let j = i; j < Math.min(i + BATCH * CONCURRENCY, total); j += BATCH) {
+                    const slice = pubkeys.slice(j, Math.min(j + BATCH, total));
+                    promises.push(
+                        rpc.withFallback((conn) =>
+                            conn.getMultipleAccountsInfo(slice, {
+                                commitment: 'confirmed',
+                                dataSlice: { offset: 0, length: 216 },
+                            }),
+                        ).catch((err: unknown) => {
+                            log.debug('SocialFeeIndex bootstrap batch failed: %s', err);
+                            return null;
+                        }),
+                    );
+                }
 
-                const shareholders = parseShareholderAddresses(data, 76);
-                for (const addr of shareholders) {
-                    this.addMapping(addr, mint);
-                    indexed++;
+                const batches = await Promise.all(promises);
+                for (const accts of batches) {
+                    if (!accts) continue;
+                    for (const acct of accts) {
+                        if (!acct) continue;
+                        const data = acct.data as Buffer;
+                        if (data.length < 76) continue;
+                        const mint = readPubkey(data, 11);
+                        if (!mint) continue;
+                        const shareholders = parseShareholderAddresses(data, 76);
+                        for (const addr of shareholders) {
+                            this.addMapping(addr, mint);
+                            indexed++;
+                        }
+                    }
+                }
+
+                // Small delay between rounds to avoid saturating the RPC provider.
+                if (i + BATCH * CONCURRENCY < total) {
+                    await new Promise<void>((r) => setTimeout(r, ROUND_DELAY_MS));
                 }
             }
 
             this.bootstrapped = true;
-            log.info('SocialFeeIndex: bootstrapped %d mappings from %d SharingConfig accounts', indexed, accounts.length);
+            log.info('SocialFeeIndex: bootstrapped %d mappings from %d SharingConfig accounts', indexed, total);
         } catch (err) {
             log.warn('SocialFeeIndex: bootstrap failed (will rely on live events): %s', err);
             this.bootstrapped = true; // don't retry on every restart
@@ -253,5 +288,86 @@ export class SocialFeeIndex {
         const set = this.index.get(socialFeePdaAddress);
         if (!set) return [];
         return [...set];
+    }
+
+    /**
+     * On-demand resolution: when the in-memory index has no entry for a
+     * social fee PDA address (e.g. the token was created before the bot
+     * started and bootstrap is disabled), attempt to find the mint via RPC.
+     *
+     * Two strategies tried in order:
+     *  1. Fetch the account at `address` directly — if it is a SharingConfig
+     *     (matching discriminator), read the mint from offset 11.
+     *  2. GPA scan for a SharingConfig whose first shareholder slot (offset 80)
+     *     matches `address` — covers the case where social_fee_pda is a
+     *     per-user PDA listed inside the SharingConfig's shareholders vec.
+     *
+     * Updates the in-memory index on success so future lookups are served
+     * from memory without another RPC round-trip.
+     */
+    async resolveFromChain(address: string, rpc: RpcFallback): Promise<string | undefined> {
+        // Strategy 1: direct account fetch
+        try {
+            const info = await rpc.withFallback((conn) =>
+                conn.getAccountInfo(new PublicKey(address), { commitment: 'confirmed' }),
+            );
+            if (info?.data) {
+                const data = Buffer.isBuffer(info.data) ? info.data : Buffer.from(info.data as Uint8Array);
+                if (data.length >= 43 && data.subarray(0, 8).equals(SHARING_CONFIG_DISC)) {
+                    const mint = readPubkey(data, 11);
+                    if (mint) {
+                        this.addMapping(address, mint);
+                        log.debug('SocialFeeIndex: on-demand resolved %s → mint %s (direct)', address.slice(0, 8), mint.slice(0, 8));
+                        return mint;
+                    }
+                }
+            }
+        } catch (err) {
+            log.debug('SocialFeeIndex: on-demand getAccountInfo failed for %s: %s', address.slice(0, 8), err);
+        }
+
+        // Strategy 2: GPA scan — find a SharingConfig whose first shareholder = address
+        try {
+            const accounts = await rpc.withFallback((conn) =>
+                conn.getProgramAccounts(new PublicKey(PUMP_FEE_PROGRAM_ID), {
+                    commitment: 'confirmed',
+                    dataSlice: { offset: 0, length: 76 },
+                    filters: [
+                        {
+                            memcmp: {
+                                offset: 0,
+                                bytes: SHARING_CONFIG_DISC.toString('base64'),
+                                encoding: 'base64',
+                            },
+                        },
+                        {
+                            // shareholders vec: count(4) at offset 76, first address at 80
+                            memcmp: {
+                                offset: 80,
+                                bytes: new PublicKey(address).toBase58(),
+                            },
+                        },
+                    ],
+                }),
+            ) as unknown as Array<{ pubkey: PublicKey; account: { data: Buffer } }>;
+
+            if (accounts.length > 0) {
+                const data = Buffer.isBuffer(accounts[0]!.account.data)
+                    ? accounts[0]!.account.data
+                    : Buffer.from(accounts[0]!.account.data as Uint8Array);
+                if (data.length >= 43) {
+                    const mint = readPubkey(data, 11);
+                    if (mint) {
+                        this.addMapping(address, mint);
+                        log.debug('SocialFeeIndex: on-demand resolved %s → mint %s (GPA)', address.slice(0, 8), mint.slice(0, 8));
+                        return mint;
+                    }
+                }
+            }
+        } catch (err) {
+            log.debug('SocialFeeIndex: on-demand GPA failed for %s: %s', address.slice(0, 8), err);
+        }
+
+        return undefined;
     }
 }
