@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react'
+import { useSEO } from '../hooks/useSEO'
 
 function BotMsg({ children, time = '10:00' }: { children: React.ReactNode; time?: string }) {
   return (

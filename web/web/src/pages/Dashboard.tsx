@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import EventCard from '../components/EventCard'
 import StatsBar from '../components/StatsBar'
 import { useEventStream } from '../hooks/useEventStream'
+import { useSEO } from '../hooks/useSEO'
 import type { FeedEvent, TokenLaunchEvent, TradeAlertEvent, GraduationEvent, FeeClaimEvent } from '../types'
 
 // ─────────────────────────────────────────────────────────────────────────────

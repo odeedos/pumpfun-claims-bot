@@ -538,3 +538,28 @@ npm run typecheck
 ```
 
 Set `LOG_LEVEL=debug` — all events are logged to stdout regardless of whether they're posted to Telegram.
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| **Runtime** | Node.js >= 20 (ESM) |
+| **Language** | TypeScript 5.7 (strict mode) |
+| **Blockchain** | Solana via `@solana/web3.js` |
+| **Telegram** | grammY framework |
+| **AI** | Groq API (llama-3.3-70b-versatile) |
+| **Frontend** | React 18 + Vite 5 + Tailwind CSS |
+| **Testing** | Vitest |
+| **Container** | Docker (multi-stage Alpine, non-root) |
+| **Hosting** | Railway (auto-deploy from GitHub) |
+| **Dependencies** | 4 production, 4 dev — intentionally minimal |
+
+## Contributing
+
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feat/my-feature`)
+3. Run tests (`npm test`) and type-check (`npm run typecheck`)
+4. Commit with a descriptive message
+5. Open a Pull Request
+
+Please ensure all tests pass and TypeScript compiles without errors before submitting.
