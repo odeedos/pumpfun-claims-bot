@@ -1,15 +1,29 @@
-# PumpFun Channel Bot
+# PumpFun Claims Bot
 
 <p align="center">
   <img src="docs/banner.svg" alt="PumpFun Claims Bot — Solana on-chain events → enrichment pipeline → Telegram channel cards" width="860"/>
 </p>
 
-Read-only Telegram channel feed that broadcasts PumpFun on-chain activity — GitHub social fee claims, token graduations, and more. Posts rich, intelligence-enriched cards to a Telegram channel in real time.
+<p align="center">
+  <a href="https://github.com/nirholas/pumpfun-claims-bot/actions/workflows/ci.yml"><img src="https://github.com/nirholas/pumpfun-claims-bot/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/nirholas/pumpfun-claims-bot?color=blue" alt="License"></a>
+  <a href="https://github.com/nirholas/pumpfun-claims-bot/stargazers"><img src="https://img.shields.io/github/stars/nirholas/pumpfun-claims-bot?style=social" alt="Stars"></a>
+  <a href="https://t.me/pumpfunclaims"><img src="https://img.shields.io/badge/Telegram-@pumpfunclaims-229ED9?logo=telegram" alt="Telegram"></a>
+  <img src="https://img.shields.io/badge/Node.js-%3E%3D20-339933?logo=node.js" alt="Node.js">
+  <img src="https://img.shields.io/badge/Solana-mainnet-9945FF?logo=solana" alt="Solana">
+  <a href="https://railway.app/template/pumpfun-claims-bot"><img src="https://img.shields.io/badge/Deploy-Railway-0B0D0E?logo=railway" alt="Deploy on Railway"></a>
+</p>
 
- **[pumpfun-claims-bot.vercel.app](https://pumpfun-claims-bot.vercel.app)** 
+<p align="center">
+  Read-only Telegram channel feed that broadcasts PumpFun on-chain activity — GitHub social fee claims, token graduations, and more. Posts rich, intelligence-enriched cards to a Telegram channel in real time.
+</p>
 
-> **Live channel**: [Telegram @ pumpfunclaims](https://t.me/pumpfunclaims) — powered by [pumpfun-claims-bot](https://pumpfun-claims-bot.vercel.app/)
->
+<p align="center">
+  <strong><a href="https://pumpfun-claims-bot.vercel.app">Website</a></strong> · <strong><a href="https://t.me/pumpfunclaims">Live Channel</a></strong> · <strong><a href="docs/railway-github-claims.md">Deploy Guide</a></strong> · <strong><a href="CONTRIBUTING.md">Contributing</a></strong>
+</p>
+
+---
+
 > **Looking for interactive monitoring?** The [telegram-bot](../telegram-bot/) supports watch management, group chats, REST API, SSE streaming, and webhooks. Use this channel-bot for simple broadcast-only channels.
 
 ## Features
